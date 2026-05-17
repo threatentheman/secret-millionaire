@@ -49,6 +49,7 @@ export type Game = {
   current_phase: GamePhase;
   million_holder_player_id: UUID | null;
   final_locked: boolean;
+  voting_locked: boolean;
   created_at: string;
 };
 
@@ -73,6 +74,7 @@ export type Player = {
 };
 
 export type PublicPlayer = Omit<Player, "role" | "device_session_id" | "login_email" | "auth_code_hash">;
+export type PlayerSelf = Omit<Player, "device_session_id" | "login_email" | "auth_code_hash">;
 
 export type SurveyQuestion = {
   id: UUID;
@@ -110,6 +112,8 @@ export type GeneratedClue = {
   created_at: string;
 };
 
+export type SafeGeneratedClue = Omit<GeneratedClue, "generated_for_player_id">;
+
 export type MillionaireChallenge = {
   id: UUID;
   game_id: UUID | null;
@@ -130,6 +134,7 @@ export type MillionaireChallengeAssignment = {
   millionaire_player_id: UUID;
   status: MillionaireChallengeStatus;
   narrator_confirmed: boolean;
+  reward_applied: boolean;
   completed_at: string | null;
   created_at: string;
 };
@@ -170,6 +175,7 @@ export type EliminationTally = {
   avatarEmoji: string | null;
   votes: number;
   isEliminated: boolean;
+  tiedForLead: boolean;
 };
 
 export type AdminSnapshot = {
@@ -183,16 +189,16 @@ export type AdminSnapshot = {
   assignments: MillionaireChallengeAssignment[];
   eliminationVotes: EliminationVote[];
   eliminationTallies: EliminationTally[];
-  sentHomeCandidate: EliminationTally | null;
+  sentHomeCandidates: EliminationTally[];
 };
 
 export type PlayerSnapshot = {
   game: PublicGame;
-  player: Player;
+  player: PlayerSelf;
   players: PublicPlayer[];
   teams: Team[];
-  publicClues: GeneratedClue[];
-  privateClues: GeneratedClue[];
+  publicClues: SafeGeneratedClue[];
+  privateClues: SafeGeneratedClue[];
   events: PublicEvent[];
   activeChallenge: (MillionaireChallengeAssignment & { challenge: MillionaireChallenge }) | null;
   eliminationVote: EliminationVote | null;
@@ -202,6 +208,6 @@ export type TvSnapshot = {
   game: PublicGame;
   players: PublicPlayer[];
   teams: Team[];
-  publicClues: GeneratedClue[];
+  publicClues: SafeGeneratedClue[];
   events: PublicEvent[];
 };

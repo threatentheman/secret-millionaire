@@ -16,10 +16,12 @@ import {
   moveMillion,
   randomizeTeams,
   releasePublicClue,
+  reseedGameContent,
   selectArmoryReward,
   selectArmoryEntrant,
   setCurrentDay,
-  setGamePhase
+  setGamePhase,
+  setVotingLocked
 } from "@/lib/actions";
 import type { AdminSnapshot, ArmoryRewardType, GamePhase, UUID } from "@/lib/domain";
 import { createBrowserClient } from "@/lib/supabase";
@@ -104,6 +106,7 @@ export function AdminPanel({ snapshot }: AdminPanelProps) {
           <ActionButton action={() => refreshAfter(randomizeTeams(snapshot.game.code))} variant="ghost"><Shuffle className="h-5 w-5" /> Randomize Teams</ActionButton>
           <ActionButton action={() => refreshAfter(generateClueForCurrentMillionaire(snapshot.game.code))} variant="ghost"><Sparkles className="h-5 w-5" /> Generate Clue</ActionButton>
           <ActionButton action={() => refreshAfter(assignMillionaireChallenge(snapshot.game.code))} variant="ghost">Assign Secret Challenge</ActionButton>
+          <ActionButton action={() => refreshAfter(reseedGameContent(snapshot.game.code))} variant="ghost">Re-seed Content</ActionButton>
           <ActionButton action={() => refreshAfter(finalLock(snapshot.game.code))} variant="danger">Final Lock</ActionButton>
           <ActionButton action={() => refreshAfter(finalReveal(snapshot.game.code))} variant="primary"><Trophy className="h-5 w-5" /> Final Reveal</ActionButton>
         </div>
@@ -165,21 +168,31 @@ export function AdminPanel({ snapshot }: AdminPanelProps) {
 
       <section className="rounded-lg bg-black/35 p-4 gold-ring">
         <h2 className="mb-3 text-lg font-black text-champagne">Vote Off</h2>
-        {snapshot.sentHomeCandidate ? (
+        <div className="mb-3 grid gap-2 sm:grid-cols-2">
+          <ActionButton action={() => refreshAfter(setVotingLocked(snapshot.game.code, false))} variant="ghost">Open Voting</ActionButton>
+          <ActionButton action={() => refreshAfter(setVotingLocked(snapshot.game.code, true))} variant="danger">Lock Voting</ActionButton>
+        </div>
+        {snapshot.sentHomeCandidates.length > 0 ? (
           <div className="rounded-lg bg-danger/15 p-4 gold-ring">
-            <p className="text-xs font-black uppercase tracking-[0.18em] text-gold">Current person to announce</p>
-            <p className="mt-2 text-3xl font-black text-champagne">
-              {snapshot.sentHomeCandidate.avatarEmoji ?? ""} {snapshot.sentHomeCandidate.playerName}
+            <p className="text-xs font-black uppercase tracking-[0.18em] text-gold">
+              {snapshot.sentHomeCandidates.length > 1 ? "Tie to resolve" : "Current person to announce"}
             </p>
-            <p className="mt-1 font-bold text-white/70">{snapshot.sentHomeCandidate.votes} vote(s)</p>
-            <button
-              className="mt-3 min-h-12 w-full rounded-lg bg-danger px-4 font-black uppercase text-white disabled:opacity-40"
-              disabled={snapshot.sentHomeCandidate.isEliminated}
-              onClick={() => void refreshAfter(markPlayerSentHome(snapshot.game.code, snapshot.sentHomeCandidate?.playerId ?? ""))}
-              type="button"
-            >
-              {snapshot.sentHomeCandidate.isEliminated ? "Already Sent Home" : "Mark Sent Home"}
-            </button>
+            {snapshot.sentHomeCandidates.map((candidate) => (
+              <div className="mt-3 rounded-lg bg-black/25 p-3" key={candidate.playerId}>
+                <p className="text-3xl font-black text-champagne">
+                  {candidate.avatarEmoji ?? ""} {candidate.playerName}
+                </p>
+                <p className="mt-1 font-bold text-white/70">{candidate.votes} vote(s)</p>
+                <button
+                  className="mt-3 min-h-12 w-full rounded-lg bg-danger px-4 font-black uppercase text-white disabled:opacity-40"
+                  disabled={candidate.isEliminated}
+                  onClick={() => void refreshAfter(markPlayerSentHome(snapshot.game.code, candidate.playerId))}
+                  type="button"
+                >
+                  {candidate.isEliminated ? "Already Sent Home" : "Mark Sent Home"}
+                </button>
+              </div>
+            ))}
           </div>
         ) : (
           <p className="rounded-lg bg-white/10 p-3 text-sm font-bold text-white/70 gold-ring">No votes submitted for day {snapshot.game.current_day} yet.</p>
@@ -206,12 +219,13 @@ export function AdminPanel({ snapshot }: AdminPanelProps) {
             return (
               <article className="rounded-lg bg-white/10 p-3 gold-ring" key={assignment.id}>
                 <p className="font-black text-champagne">{challenge?.title ?? "Secret challenge"}</p>
-                <p className="mt-1 text-sm text-white/70">{player?.name ?? "Unknown player"} · {assignment.status} · reward {challenge?.reward_type ?? "unknown"}</p>
+                <p className="mt-1 text-sm text-white/70">{player?.name ?? "Unknown player"} · {assignment.status} · reward {challenge?.reward_type ?? "unknown"} · {assignment.reward_applied ? "applied" : "not applied"}</p>
+                <p className="mt-1 text-xs font-bold uppercase tracking-[0.14em] text-white/45">Targeted rewards use the Player Target selector above.</p>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  <button className="min-h-11 rounded-lg bg-gold px-3 font-black uppercase text-obsidian" onClick={() => void refreshAfter(confirmMillionaireChallenge(snapshot.game.code, assignment.id, true))} type="button">
+                  <button className="min-h-11 rounded-lg bg-gold px-3 font-black uppercase text-obsidian disabled:opacity-40" disabled={assignment.reward_applied} onClick={() => void refreshAfter(confirmMillionaireChallenge(snapshot.game.code, assignment.id, true, selectedPlayer))} type="button">
                     Confirm Success
                   </button>
-                  <button className="min-h-11 rounded-lg bg-white/10 px-3 font-black uppercase text-champagne gold-ring" onClick={() => void refreshAfter(confirmMillionaireChallenge(snapshot.game.code, assignment.id, false))} type="button">
+                  <button className="min-h-11 rounded-lg bg-white/10 px-3 font-black uppercase text-champagne gold-ring disabled:opacity-40" disabled={assignment.reward_applied} onClick={() => void refreshAfter(confirmMillionaireChallenge(snapshot.game.code, assignment.id, false))} type="button">
                     Reject
                   </button>
                 </div>

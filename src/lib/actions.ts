@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import {
   AdminSnapshot,
   ArmoryRewardType,
@@ -18,16 +19,18 @@ import {
   Notification,
   Player,
   PlayerSnapshot,
+  PlayerSelf,
   PublicEvent,
   PublicGame,
   PublicPlayer,
+  SafeGeneratedClue,
   SurveyAnswerInput,
   SurveyQuestion,
   Team,
   TvSnapshot,
   UUID
 } from "./domain";
-import { clearAdminSession, setAdminSession, validateAdminCredentials } from "./admin-auth";
+import { clearAdminSession, requireAdminSession, setAdminSession, validateAdminCredentials } from "./admin-auth";
 import { millionaireChallengeLibrary, surveyQuestions } from "./seed";
 import { createServiceClient } from "./supabase";
 
@@ -52,6 +55,18 @@ export async function adminLogout(): Promise<ActionResult<{ signedOut: true }>> 
   return { ok: true, data: { signedOut: true } };
 }
 
+export async function playerLogout(gameCode: string): Promise<ActionResult<{ signedOut: true }>> {
+  const cookieStore = await cookies();
+  cookieStore.set(playerCookieName(gameCode), "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 0
+  });
+  return { ok: true, data: { signedOut: true } };
+}
+
 function shortCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 5 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
@@ -65,14 +80,28 @@ function hashAuthCode(gameId: UUID, email: string, authCode: string) {
   return createHash("sha256").update(`${gameId}:${normalizeEmail(email)}:${authCode}`).digest("hex");
 }
 
+function playerCookieName(gameCode: string) {
+  return `sm-player-${normalizeCode(gameCode)}`;
+}
+
 function publicGame(game: Game): PublicGame {
   const { million_holder_player_id: _hidden, ...safeGame } = game;
   return safeGame;
 }
 
+function playerSelf(player: Player): PlayerSelf {
+  const { device_session_id: _session, login_email: _email, auth_code_hash: _hash, ...safePlayer } = player;
+  return safePlayer;
+}
+
 function publicPlayer(player: Player): PublicPlayer {
   const { role: _role, device_session_id: _session, login_email: _email, auth_code_hash: _hash, ...safePlayer } = player;
   return safePlayer;
+}
+
+function safeClue(clue: GeneratedClue): SafeGeneratedClue {
+  const { generated_for_player_id: _holder, ...safe } = clue;
+  return safe;
 }
 
 function requireData<T>(result: DbResult<T> | DbListResult<T>, fallback: string): T | T[] {
@@ -89,6 +118,40 @@ async function getGameByCode(code: string): Promise<Game> {
   const supabase = createServiceClient();
   const result = await supabase.from("games").select("*").eq("code", normalizeCode(code)).single() as DbResult<Game>;
   return requireData<Game>(result, "Game not found.") as Game;
+}
+
+async function setPlayerSessionCookie(gameCode: string, deviceSessionId: string) {
+  const cookieStore = await cookies();
+  cookieStore.set(playerCookieName(gameCode), deviceSessionId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 7
+  });
+}
+
+async function requirePlayerSession(game: Game, playerId: UUID): Promise<Player> {
+  const cookieStore = await cookies();
+  const deviceSessionId = cookieStore.get(playerCookieName(game.code))?.value;
+  if (!deviceSessionId) {
+    throw new Error("Player session expired. Log in again.");
+  }
+  const supabase = createServiceClient();
+  const result = await supabase
+    .from("players")
+    .select("*")
+    .eq("id", playerId)
+    .eq("game_id", game.id)
+    .eq("device_session_id", deviceSessionId)
+    .single() as DbResult<Player>;
+  return requireData<Player>(result, "Player session expired. Log in again.") as Player;
+}
+
+function assertAdminTarget(playerId: UUID) {
+  if (!playerId) {
+    throw new Error("Select a player target first.");
+  }
 }
 
 async function insertNotification(gameId: UUID, title: string, message: string, audience: Notification["audience"], recipientPlayerId?: UUID) {
@@ -115,6 +178,7 @@ async function insertPublicEvent(gameId: UUID, eventType: string, title: string,
 
 export async function createGame(name = "Secret Millionaire: Bali Villa Edition"): Promise<ActionResult<{ code: string }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     let game: Game | null = null;
 
@@ -144,6 +208,7 @@ export async function createGame(name = "Secret Millionaire: Bali Villa Edition"
 }
 
 export async function getAdminGames(): Promise<Game[]> {
+  await requireAdminSession();
   const supabase = createServiceClient();
   const result = await supabase
     .from("games")
@@ -171,6 +236,7 @@ async function isSurveyComplete(gameId: UUID, playerId: UUID) {
 
 export async function hasCompletedSurvey(gameCode: string, playerId: UUID): Promise<boolean> {
   const game = await getGameByCode(gameCode);
+  await requirePlayerSession(game, playerId);
   return isSurveyComplete(game.id, playerId);
 }
 
@@ -203,6 +269,7 @@ export async function joinGame(gameCode: string, name: string, avatarEmoji: stri
         throw new Error("That email is already in this game, but the private code did not match.");
       }
       await supabase.from("players").update({ device_session_id: deviceSessionId, name: cleanName, avatar_emoji: avatarEmoji || existing.data.avatar_emoji }).eq("id", existing.data.id);
+      await setPlayerSessionCookie(game.code, deviceSessionId);
       const surveyComplete = await isSurveyComplete(game.id, existing.data.id);
       return { ok: true, data: { playerId: existing.data.id, code: game.code, surveyComplete } };
     }
@@ -220,6 +287,7 @@ export async function joinGame(gameCode: string, name: string, avatarEmoji: stri
       .select("*")
       .single() as DbResult<Player>;
     const player = requireData<Player>(inserted, "Could not join game.") as Player;
+    await setPlayerSessionCookie(game.code, deviceSessionId);
     await insertPublicEvent(game.id, "player_joined", "Player joined", `${player.avatar_emoji ?? "◇"} ${player.name} entered the villa.`, true);
     revalidatePath(`/game/${game.code}`);
     return { ok: true, data: { playerId: player.id, code: game.code, surveyComplete: false } };
@@ -232,8 +300,13 @@ export async function submitSurvey(gameCode: string, playerId: UUID, answers: Su
   try {
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
+    await requirePlayerSession(game, playerId);
+    const questionsResult = await supabase.from("survey_questions").select("*").eq("game_id", game.id).order("created_at") as DbListResult<SurveyQuestion>;
+    const questions = questionsResult.data ?? [];
+    const questionIds = new Set(questions.map((question) => question.id));
     const rows = answers
       .filter((answer) => answer.answer.trim().length > 0)
+      .filter((answer) => questionIds.has(answer.questionId))
       .map((answer) => ({
         game_id: game.id,
         player_id: playerId,
@@ -241,8 +314,8 @@ export async function submitSurvey(gameCode: string, playerId: UUID, answers: Su
         answer: answer.answer.trim()
       }));
 
-    if (rows.length === 0) {
-      return { ok: true, data: { saved: 0 } };
+    if (rows.length !== questions.length) {
+      throw new Error("Answer every survey question before continuing.");
     }
 
     const result = await supabase.from("survey_answers").upsert(rows, { onConflict: "player_id,question_id" });
@@ -258,6 +331,7 @@ export async function submitSurvey(gameCode: string, playerId: UUID, answers: Su
 
 export async function setGamePhase(gameCode: string, phase: GamePhase): Promise<ActionResult<GamePhase>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("games").update({ current_phase: phase, status: phase === "complete" ? "complete" : "active" }).eq("id", game.id);
@@ -271,6 +345,7 @@ export async function setGamePhase(gameCode: string, phase: GamePhase): Promise<
 
 export async function setCurrentDay(gameCode: string, day: number): Promise<ActionResult<number>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("games").update({ current_day: day }).eq("id", game.id);
@@ -284,6 +359,7 @@ export async function setCurrentDay(gameCode: string, day: number): Promise<Acti
 
 export async function assignInitialMillion(gameCode: string): Promise<ActionResult<{ holderName: string }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     const playersResult = await supabase.from("players").select("*").eq("game_id", game.id).eq("is_host", false).eq("is_eliminated", false) as DbListResult<Player>;
@@ -308,6 +384,7 @@ export async function assignInitialMillion(gameCode: string): Promise<ActionResu
 
 export async function awardMulanLives(gameCode: string, winnerIds: UUID[]): Promise<ActionResult<{ winners: number }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("players").update({ extra_lives: 0 }).eq("game_id", game.id);
@@ -324,6 +401,16 @@ export async function awardMulanLives(gameCode: string, winnerIds: UUID[]): Prom
 }
 
 export async function moveMillion(gameCode: string, toPlayerId: UUID, reason: MillionTransferReason = "admin_move"): Promise<ActionResult<{ moved: true }>> {
+  try {
+    await requireAdminSession();
+    assertAdminTarget(toPlayerId);
+    return await moveMillionInternal(gameCode, toPlayerId, reason);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Move failed." };
+  }
+}
+
+async function moveMillionInternal(gameCode: string, toPlayerId: UUID, reason: MillionTransferReason = "admin_move"): Promise<ActionResult<{ moved: true }>> {
   try {
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
@@ -349,13 +436,24 @@ export async function fireBazooka(gameCode: string, shooterPlayerId: UUID, targe
   try {
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
+    const sessionPlayer = await requirePlayerSession(game, shooterPlayerId);
     if (game.final_locked) {
       throw new Error("Bazookas are locked.");
     }
-    const shooterResult = await supabase.from("players").select("*").eq("id", shooterPlayerId).single() as DbResult<Player>;
-    const shooter = requireData<Player>(shooterResult, "Shooter not found.") as Player;
+    const shooter = sessionPlayer;
+    if (shooter.is_eliminated) {
+      throw new Error("Eliminated players cannot fire Bazookas.");
+    }
     if (!shooter.bazooka_available) {
       throw new Error("Your Bazooka has already been used.");
+    }
+    if (targetPlayerId === shooterPlayerId) {
+      throw new Error("You cannot Bazooka yourself.");
+    }
+    const targetResult = await supabase.from("players").select("*").eq("id", targetPlayerId).eq("game_id", game.id).single() as DbResult<Player>;
+    const target = requireData<Player>(targetResult, "Target not found.") as Player;
+    if (target.is_eliminated) {
+      throw new Error("That player is already out.");
     }
     const currentHolderId = game.million_holder_player_id;
     const wasCorrect = targetPlayerId === currentHolderId;
@@ -373,7 +471,7 @@ export async function fireBazooka(gameCode: string, shooterPlayerId: UUID, targe
         await insertNotification(game.id, "Bazooka hit shield", "A correct Bazooka was blocked by a shield.", "admin");
         await insertPublicEvent(game.id, "bazooka_blocked", "A Bazooka hit a shield.", "The Million did not move.", true);
       } else {
-        await moveMillion(game.code, shooterPlayerId, "bazooka_success");
+        await moveMillionInternal(game.code, shooterPlayerId, "bazooka_success");
         await insertNotification(game.id, "Bazooka hit", "A correct Bazooka moved The Million.", "admin");
       }
     } else {
@@ -391,6 +489,10 @@ export async function submitEliminationVote(gameCode: string, voterPlayerId: UUI
   try {
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
+    await requirePlayerSession(game, voterPlayerId);
+    if (game.voting_locked) {
+      throw new Error("Voting is locked.");
+    }
     if (voterPlayerId === targetPlayerId) {
       throw new Error("You cannot vote for yourself.");
     }
@@ -430,6 +532,8 @@ export async function submitEliminationVote(gameCode: string, voterPlayerId: UUI
 
 export async function markPlayerSentHome(gameCode: string, playerId: UUID): Promise<ActionResult<{ eliminated: true }>> {
   try {
+    await requireAdminSession();
+    assertAdminTarget(playerId);
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     const playerResult = await supabase.from("players").select("*").eq("id", playerId).eq("game_id", game.id).single() as DbResult<Player>;
@@ -442,6 +546,68 @@ export async function markPlayerSentHome(gameCode: string, playerId: UUID): Prom
     return { ok: true, data: { eliminated: true } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not send player home." };
+  }
+}
+
+export async function setVotingLocked(gameCode: string, locked: boolean): Promise<ActionResult<{ locked: boolean }>> {
+  try {
+    await requireAdminSession();
+    const supabase = createServiceClient();
+    const game = await getGameByCode(gameCode);
+    await supabase.from("games").update({ voting_locked: locked }).eq("id", game.id);
+    await insertNotification(game.id, locked ? "Voting locked" : "Voting opened", locked ? "Vote-off submissions are closed." : "Vote-off submissions are open.", "admin");
+    await insertPublicEvent(game.id, locked ? "voting_locked" : "voting_open", locked ? "Voting is locked." : "Voting is open.", locked ? "The narrator has closed vote submissions." : "Submit your vote-off choice now.", true);
+    revalidatePath(`/admin/${game.code}`);
+    return { ok: true, data: { locked } };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Voting lock update failed." };
+  }
+}
+
+export async function reseedGameContent(gameCode: string): Promise<ActionResult<{ questions: number; challenges: number }>> {
+  try {
+    await requireAdminSession();
+    const supabase = createServiceClient();
+    const game = await getGameByCode(gameCode);
+
+    const currentQuestionsResult = await supabase.from("survey_questions").select("*").eq("game_id", game.id) as DbListResult<SurveyQuestion>;
+    const currentQuestions = currentQuestionsResult.data ?? [];
+    const wantedQuestions = new Set<string>(surveyQuestions);
+    const currentQuestionText = new Set(currentQuestions.map((question) => question.question));
+    const questionIdsToDelete = currentQuestions.filter((question) => !wantedQuestions.has(question.question)).map((question) => question.id);
+    if (questionIdsToDelete.length > 0) {
+      await supabase.from("survey_questions").delete().in("id", questionIdsToDelete);
+    }
+    const questionsToInsert = surveyQuestions.filter((question) => !currentQuestionText.has(question));
+    if (questionsToInsert.length > 0) {
+      await supabase.from("survey_questions").insert(questionsToInsert.map((question) => ({ game_id: game.id, question, question_type: "text", clue_safe: true })));
+    }
+
+    const currentChallengesResult = await supabase.from("millionaire_challenges").select("*").eq("game_id", game.id) as DbListResult<MillionaireChallenge>;
+    const currentChallenges = currentChallengesResult.data ?? [];
+    const wantedChallengeTitles = new Set(millionaireChallengeLibrary.map((challenge) => challenge.title));
+    const currentChallengeTitles = new Set(currentChallenges.map((challenge) => challenge.title));
+    const challengeIdsToDeactivate = currentChallenges.filter((challenge) => !wantedChallengeTitles.has(challenge.title)).map((challenge) => challenge.id);
+    if (challengeIdsToDeactivate.length > 0) {
+      await supabase.from("millionaire_challenges").update({ active: false }).in("id", challengeIdsToDeactivate);
+    }
+    await Promise.all(millionaireChallengeLibrary.map(async (challenge) => {
+      if (currentChallengeTitles.has(challenge.title)) {
+        await supabase
+          .from("millionaire_challenges")
+          .update({ description: challenge.description, difficulty: challenge.difficulty, reward_type: challenge.reward_type, requires_narrator: true, active: true })
+          .eq("game_id", game.id)
+          .eq("title", challenge.title);
+      } else {
+        await supabase.from("millionaire_challenges").insert({ ...challenge, game_id: game.id, requires_narrator: true, active: true });
+      }
+    }));
+
+    await insertNotification(game.id, "Seed content refreshed", "Survey questions and secret challenge library now match src/lib/seed.ts.", "admin");
+    revalidatePath(`/admin/${game.code}`);
+    return { ok: true, data: { questions: surveyQuestions.length, challenges: millionaireChallengeLibrary.length } };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Re-seed failed." };
   }
 }
 
@@ -468,6 +634,7 @@ function phraseClue(question: string, answer: string): string {
 
 export async function generateClueForCurrentMillionaire(gameCode: string): Promise<ActionResult<GeneratedClue>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     if (!game.million_holder_player_id) {
@@ -527,6 +694,7 @@ export async function generateClueForCurrentMillionaire(gameCode: string): Promi
 
 export async function assignClueToArmoryEntrant(gameCode: string, clueId: UUID, playerId: UUID): Promise<ActionResult<{ assigned: true }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("generated_clues").update({ recipient_player_id: playerId, released: true }).eq("id", clueId).eq("game_id", game.id);
@@ -541,6 +709,7 @@ export async function assignClueToArmoryEntrant(gameCode: string, clueId: UUID, 
 
 export async function releasePublicClue(gameCode: string, clueId: UUID): Promise<ActionResult<{ released: true }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     const clueResult = await supabase.from("generated_clues").select("*").eq("id", clueId).eq("game_id", game.id).single() as DbResult<GeneratedClue>;
@@ -557,6 +726,7 @@ export async function releasePublicClue(gameCode: string, clueId: UUID): Promise
 
 export async function createPublicAlert(gameCode: string, title: string, message: string): Promise<ActionResult<{ created: true }>> {
   try {
+    await requireAdminSession();
     const game = await getGameByCode(gameCode);
     await insertPublicEvent(game.id, "admin_alert", title, message, true);
     await insertNotification(game.id, "Public event created", title, "admin");
@@ -569,6 +739,7 @@ export async function createPublicAlert(gameCode: string, title: string, message
 
 export async function randomizeTeams(gameCode: string): Promise<ActionResult<{ teams: number }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     const playersResult = await supabase.from("players").select("*").eq("game_id", game.id).eq("is_eliminated", false) as DbListResult<Player>;
@@ -589,9 +760,11 @@ export async function randomizeTeams(gameCode: string): Promise<ActionResult<{ t
 
 export async function selectArmoryEntrant(gameCode: string, playerId: UUID): Promise<ActionResult<{ selected: true }>> {
   try {
+    await requireAdminSession();
+    assertAdminTarget(playerId);
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
-    await supabase.from("armory_entries").insert({ game_id: game.id, day: game.current_day, player_id: playerId });
+    await supabase.from("armory_entries").upsert({ game_id: game.id, day: game.current_day, player_id: playerId }, { onConflict: "game_id,day,player_id" });
     await insertNotification(game.id, "Armory access", "You have been selected to enter the Armory.", "player", playerId);
     await insertNotification(game.id, "Armory entrant selected", "A player is waiting for an Armory reward.", "admin");
     await insertPublicEvent(game.id, "armory_selected", "The Armory is open.", "One player has entered the Armory.", true);
@@ -604,6 +777,8 @@ export async function selectArmoryEntrant(gameCode: string, playerId: UUID): Pro
 
 export async function selectArmoryReward(gameCode: string, playerId: UUID, reward: ArmoryRewardType): Promise<ActionResult<{ reward: ArmoryRewardType }>> {
   try {
+    await requireAdminSession();
+    assertAdminTarget(playerId);
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("armory_entries").update({ selected_reward: reward }).eq("game_id", game.id).eq("player_id", playerId).eq("day", game.current_day);
@@ -621,6 +796,7 @@ export async function selectArmoryReward(gameCode: string, playerId: UUID, rewar
 
 export async function assignMillionaireChallenge(gameCode: string): Promise<ActionResult<{ title: string }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     if (!game.million_holder_player_id) {
@@ -648,6 +824,7 @@ export async function submitMillionaireChallengeAttempt(gameCode: string, assign
   try {
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
+    await requirePlayerSession(game, playerId);
     await supabase.from("millionaire_challenge_assignments").update({ status: "attempted" }).eq("id", assignmentId).eq("millionaire_player_id", playerId);
     await insertNotification(game.id, "Millionaire challenge attempted", "Narrator confirmation is required.", "admin");
     revalidatePath(`/admin/${game.code}/challenges`);
@@ -668,11 +845,33 @@ async function randomActivePlayer(gameId: UUID, excludedPlayerIds: UUID[] = []) 
   return players[Math.floor(Math.random() * players.length)] ?? null;
 }
 
-async function applyMillionaireReward(game: Game, assignment: MillionaireChallengeAssignment & { millionaire_challenges: MillionaireChallenge }) {
+function rewardNeedsTarget(reward: string) {
+  return reward.includes("move_million") || reward.includes("steal_life") || reward === "block_bazooka";
+}
+
+async function applyMillionaireReward(game: Game, assignment: MillionaireChallengeAssignment & { millionaire_challenges: MillionaireChallenge }, targetPlayerId: UUID | null) {
   const supabase = createServiceClient();
   const reward = assignment.millionaire_challenges.reward_type;
   const millionaireId = assignment.millionaire_player_id;
   const notes: string[] = [];
+
+  if (rewardNeedsTarget(reward) && !targetPlayerId) {
+    throw new Error("Select a reward target before confirming this challenge.");
+  }
+  const rewardTarget = targetPlayerId
+    ? requireData<Player>(await supabase.from("players").select("*").eq("game_id", game.id).eq("id", targetPlayerId).single() as DbResult<Player>, "Reward target not found.") as Player
+    : null;
+  if (rewardTarget?.is_eliminated) {
+    throw new Error("Reward target is already out.");
+  }
+  if (reward === "block_bazooka" && rewardTarget?.id === millionaireId) {
+    throw new Error("Block Bazooka needs a target other than the Millionaire.");
+  }
+  if (reward.includes("steal_life")) {
+    if (!rewardTarget || rewardTarget.id === millionaireId || rewardTarget.extra_lives <= 0) {
+      throw new Error("Steal life needs a different target who has an extra life.");
+    }
+  }
 
   if (reward.includes("shield") || reward === "double_bazooka_protection") {
     await supabase.from("players").update({ shield_active: true }).eq("id", millionaireId);
@@ -680,22 +879,15 @@ async function applyMillionaireReward(game: Game, assignment: MillionaireChallen
   }
 
   if (reward.includes("move_million")) {
-    const target = await randomActivePlayer(game.id, [millionaireId]);
+    const target = rewardTarget ?? await randomActivePlayer(game.id, [millionaireId]);
     if (target) {
-      await moveMillion(game.code, target.id, "secret_challenge_reward");
-      notes.push(`The Million moved to a random active player: ${target.name}.`);
+      await moveMillionInternal(game.code, target.id, "secret_challenge_reward");
+      notes.push(`The Million moved to ${target.name}.`);
     }
   }
 
   if (reward.includes("steal_life")) {
-    const victimsResult = await supabase
-      .from("players")
-      .select("*")
-      .eq("game_id", game.id)
-      .eq("is_eliminated", false)
-      .gt("extra_lives", 0) as DbListResult<Player>;
-    const victims = (victimsResult.data ?? []).filter((player) => player.id !== millionaireId);
-    const victim = victims[Math.floor(Math.random() * victims.length)];
+    const victim = rewardTarget;
     if (victim) {
       const millionaireResult = await supabase.from("players").select("*").eq("id", millionaireId).single() as DbResult<Player>;
       const millionaire = requireData<Player>(millionaireResult, "Millionaire not found.") as Player;
@@ -709,7 +901,7 @@ async function applyMillionaireReward(game: Game, assignment: MillionaireChallen
   }
 
   if (reward === "block_bazooka") {
-    const target = await randomActivePlayer(game.id, [millionaireId]);
+    const target = rewardTarget;
     if (target) {
       await supabase.from("players").update({ bazooka_available: false }).eq("id", target.id);
       await insertNotification(game.id, "Bazooka blocked", "Your Bazooka has been blocked by a secret reward.", "player", target.id);
@@ -740,8 +932,9 @@ async function applyMillionaireReward(game: Game, assignment: MillionaireChallen
   return notes;
 }
 
-export async function confirmMillionaireChallenge(gameCode: string, assignmentId: UUID, success: boolean): Promise<ActionResult<{ success: boolean }>> {
+export async function confirmMillionaireChallenge(gameCode: string, assignmentId: UUID, success: boolean, rewardTargetPlayerId?: UUID): Promise<ActionResult<{ success: boolean }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     const assignmentResult = await supabase
@@ -750,15 +943,28 @@ export async function confirmMillionaireChallenge(gameCode: string, assignmentId
       .eq("id", assignmentId)
       .single() as DbResult<MillionaireChallengeAssignment & { millionaire_challenges: MillionaireChallenge }>;
     const assignment = requireData<MillionaireChallengeAssignment & { millionaire_challenges: MillionaireChallenge }>(assignmentResult, "Assignment not found.") as MillionaireChallengeAssignment & { millionaire_challenges: MillionaireChallenge };
-    await supabase.from("millionaire_challenge_assignments").update({
-      status: success ? "confirmed" : "rejected",
-      narrator_confirmed: success,
-      completed_at: success ? new Date().toISOString() : null
-    }).eq("id", assignmentId);
+    if (assignment.game_id !== game.id) {
+      throw new Error("Challenge assignment does not belong to this game.");
+    }
+    if (assignment.reward_applied) {
+      throw new Error("This reward has already been applied.");
+    }
     if (success) {
-      const appliedNotes = await applyMillionaireReward(game, assignment);
+      const appliedNotes = await applyMillionaireReward(game, assignment, rewardTargetPlayerId ?? null);
+      await supabase.from("millionaire_challenge_assignments").update({
+        status: "confirmed",
+        narrator_confirmed: true,
+        reward_applied: true,
+        completed_at: new Date().toISOString()
+      }).eq("id", assignmentId);
       await insertNotification(game.id, "Reward applied", appliedNotes.join(" ") || "Secret challenge reward applied.", "admin");
       await insertPublicEvent(game.id, "secret_challenge_complete", "A secret challenge has been completed.", "The villa just shifted.", true);
+    } else {
+      await supabase.from("millionaire_challenge_assignments").update({
+        status: "rejected",
+        narrator_confirmed: false,
+        completed_at: null
+      }).eq("id", assignmentId);
     }
     await insertNotification(game.id, success ? "Challenge confirmed" : "Challenge rejected", assignment.millionaire_challenges.title, "admin");
     revalidatePath(`/admin/${game.code}/challenges`);
@@ -770,6 +976,7 @@ export async function confirmMillionaireChallenge(gameCode: string, assignmentId
 
 export async function finalLock(gameCode: string): Promise<ActionResult<{ locked: true }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("games").update({ final_locked: true, current_phase: "final_lock", status: "locked" }).eq("id", game.id);
@@ -784,6 +991,7 @@ export async function finalLock(gameCode: string): Promise<ActionResult<{ locked
 
 export async function finalReveal(gameCode: string): Promise<ActionResult<{ revealed: true }>> {
   try {
+    await requireAdminSession();
     const supabase = createServiceClient();
     const game = await getGameByCode(gameCode);
     await supabase.from("games").update({ current_phase: "final_reveal", status: "complete" }).eq("id", game.id);
@@ -796,6 +1004,7 @@ export async function finalReveal(gameCode: string): Promise<ActionResult<{ reve
 }
 
 export async function getAdminSnapshot(gameCode: string): Promise<AdminSnapshot> {
+  await requireAdminSession();
   const supabase = createServiceClient();
   const game = await getGameByCode(gameCode);
   const [players, teams, clues, events, notifications, challenges, assignments, eliminationVotes] = await Promise.all([
@@ -822,7 +1031,7 @@ export async function getAdminSnapshot(gameCode: string): Promise<AdminSnapshot>
     assignments: assignments.data ?? [],
     eliminationVotes: voteRows,
     eliminationTallies,
-    sentHomeCandidate: eliminationTallies[0] ?? null
+    sentHomeCandidates: eliminationTallies.filter((tally) => tally.tiedForLead)
   };
 }
 
@@ -831,21 +1040,25 @@ function buildEliminationTallies(players: Player[], votes: EliminationVote[]): E
   for (const vote of votes) {
     counts.set(vote.target_player_id, (counts.get(vote.target_player_id) ?? 0) + 1);
   }
-  return players
+  const tallies = players
     .map((player) => ({
       playerId: player.id,
       playerName: player.name,
       avatarEmoji: player.avatar_emoji,
       votes: counts.get(player.id) ?? 0,
-      isEliminated: player.is_eliminated
+      isEliminated: player.is_eliminated,
+      tiedForLead: false
     }))
     .filter((tally) => tally.votes > 0)
     .sort((left, right) => right.votes - left.votes || left.playerName.localeCompare(right.playerName));
+  const leadVotes = tallies[0]?.votes ?? 0;
+  return tallies.map((tally) => ({ ...tally, tiedForLead: tally.votes === leadVotes }));
 }
 
 export async function getPlayerSnapshot(gameCode: string, playerId: UUID): Promise<PlayerSnapshot> {
   const supabase = createServiceClient();
   const game = await getGameByCode(gameCode);
+  const sessionPlayer = await requirePlayerSession(game, playerId);
   const [playerResult, playersResult, teamsResult, publicCluesResult, privateCluesResult, eventsResult, assignmentsResult, eliminationVoteResult] = await Promise.all([
     supabase.from("players").select("*").eq("id", playerId).eq("game_id", game.id).single() as unknown as Promise<DbResult<Player>>,
     supabase.from("players").select("*").eq("game_id", game.id).order("joined_at") as unknown as Promise<DbListResult<Player>>,
@@ -857,14 +1070,17 @@ export async function getPlayerSnapshot(gameCode: string, playerId: UUID): Promi
     supabase.from("elimination_votes").select("*").eq("game_id", game.id).eq("day", game.current_day).eq("voter_player_id", playerId).maybeSingle() as unknown as Promise<DbResult<EliminationVote>>
   ]);
   const player = requireData<Player>(playerResult, "Player not found.") as Player;
+  if (player.id !== sessionPlayer.id) {
+    throw new Error("Player session expired. Log in again.");
+  }
   const assignment = assignmentsResult.data?.[0];
   return {
     game: publicGame(game),
-    player,
+    player: playerSelf(player),
     players: (playersResult.data ?? []).map(publicPlayer),
     teams: teamsResult.data ?? [],
-    publicClues: publicCluesResult.data ?? [],
-    privateClues: privateCluesResult.data ?? [],
+    publicClues: (publicCluesResult.data ?? []).map(safeClue),
+    privateClues: (privateCluesResult.data ?? []).map(safeClue),
     events: eventsResult.data ?? [],
     activeChallenge: assignment ? { ...assignment, challenge: assignment.millionaire_challenges } : null,
     eliminationVote: eliminationVoteResult.data ?? null
@@ -884,7 +1100,7 @@ export async function getTvSnapshot(gameCode: string): Promise<TvSnapshot> {
     game: publicGame(game),
     players: (playersResult.data ?? []).map(publicPlayer),
     teams: teamsResult.data ?? [],
-    publicClues: cluesResult.data ?? [],
+    publicClues: (cluesResult.data ?? []).map(safeClue),
     events: eventsResult.data ?? []
   };
 }

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { adminLogout } from "@/lib/actions";
+import { adminLogout, playerLogout } from "@/lib/actions";
 
 export function SmartHomeLink() {
   const pathname = usePathname();
@@ -26,6 +26,7 @@ export function SmartHomeLink() {
     } else {
       const code = window.localStorage.getItem("secret-millionaire-last-code");
       if (code) {
+        await playerLogout(code);
         window.localStorage.removeItem(`secret-millionaire-player-${code}`);
       }
       window.localStorage.removeItem("secret-millionaire-last-code");
