@@ -577,8 +577,8 @@ export async function markPlayerSentHome(gameCode: string, playerId: UUID): Prom
     const playerResult = await supabase.from("players").select("*").eq("id", playerId).eq("game_id", game.id).single() as DbResult<Player>;
     const player = requireData<Player>(playerResult, "Player not found.") as Player;
     await supabase.from("players").update({ is_eliminated: true }).eq("id", player.id);
-    await insertNotification(game.id, "Player sent home", `${player.name} has been marked eliminated.`, "admin");
-    await insertPublicEvent(game.id, "player_sent_home", "A player has been sent home.", `${player.name} has left the game.`, true);
+    await insertNotification(game.id, "Player marked out", `${player.name} has been marked out. Announce this when ready.`, "admin");
+    await insertNotification(game.id, "You are out", "The narrator has marked you out of the game.", "player", player.id);
     revalidatePath(`/admin/${game.code}`);
     revalidatePath(`/tv/${game.code}`);
     return { ok: true, data: { eliminated: true } };

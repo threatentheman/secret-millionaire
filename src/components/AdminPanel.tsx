@@ -136,6 +136,9 @@ export function AdminPanel({ snapshot }: AdminPanelProps) {
             <ActionButton action={() => refreshAfter(moveMillion(snapshot.game.code, selectedPlayer))} variant="ghost">Move Million Here</ActionButton>
             <ActionButton action={() => refreshAfter(selectArmoryEntrant(snapshot.game.code, selectedPlayer))} variant="ghost">Select Armory Entrant</ActionButton>
           </div>
+          <div className="mt-3">
+            <ActionButton action={() => refreshAfter(markPlayerSentHome(snapshot.game.code, selectedPlayer))} variant="danger">Mark Selected Player Out</ActionButton>
+          </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
             <select className="min-h-12 rounded-lg bg-black/60 px-3 font-bold text-champagne gold-ring" onChange={(event) => setSelectedArmoryReward(event.target.value as ArmoryRewardType)} value={selectedArmoryReward}>
               {armoryRewards.map((reward) => <option key={reward.value} value={reward.value}>{reward.label}</option>)}
@@ -189,7 +192,7 @@ export function AdminPanel({ snapshot }: AdminPanelProps) {
                   onClick={() => void refreshAfter(markPlayerSentHome(snapshot.game.code, candidate.playerId))}
                   type="button"
                 >
-                  {candidate.isEliminated ? "Already Sent Home" : "Mark Sent Home"}
+                  {candidate.isEliminated ? "Already Out" : "Mark Out"}
                 </button>
               </div>
             ))}
