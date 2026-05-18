@@ -45,6 +45,9 @@ export function SmartHomeLink() {
       <Link className="rounded-lg bg-white/10 px-3 py-2 text-sm font-bold text-champagne gold-ring" href="/rules">
         Rules
       </Link>
+      <Link className="rounded-lg bg-white/10 px-3 py-2 text-sm font-bold text-champagne gold-ring" href="/survey-questions">
+        Survey
+      </Link>
       {hasPlayerSession || pathname.startsWith("/admin") ? (
         <button className="rounded-lg bg-white/10 px-3 py-2 text-sm font-bold text-champagne gold-ring" onClick={() => void logout()} type="button">
           Logout

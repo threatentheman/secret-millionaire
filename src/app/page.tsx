@@ -14,9 +14,12 @@ export default function HomePage() {
         <div className="mt-8 rounded-lg bg-black/35 p-4 gold-ring">
           <HomeJoin />
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="mt-4 grid grid-cols-3 gap-3">
           <Link className="rounded-lg bg-white/10 px-4 py-3 text-center font-bold text-champagne gold-ring" href="/rules">
             Rules
+          </Link>
+          <Link className="rounded-lg bg-white/10 px-4 py-3 text-center font-bold text-champagne gold-ring" href="/survey-questions">
+            Survey
           </Link>
           <Link className="rounded-lg bg-white/10 px-4 py-3 text-center font-bold text-champagne gold-ring" href="/admin">
             Admin
