@@ -30,7 +30,7 @@ import {
   TvSnapshot,
   UUID
 } from "./domain";
-import { clearAdminSession, requireAdminSession, setAdminSession, validateAdminCredentials } from "./admin-auth";
+import { clearAdminSession, requireAdminSession, setAdminSession, validateAdminCredentials, validateAdminPassword } from "./admin-auth";
 import { millionaireChallengeLibrary, surveyQuestions } from "./seed";
 import { createServiceClient } from "./supabase";
 
@@ -293,6 +293,44 @@ export async function joinGame(gameCode: string, name: string, avatarEmoji: stri
     return { ok: true, data: { playerId: player.id, code: game.code, surveyComplete: false } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Join failed." };
+  }
+}
+
+export async function resetPlayerPrivateCode(gameCode: string, email: string, newAuthCode: string, adminPassword: string, deviceSessionId: string): Promise<ActionResult<{ playerId: UUID; code: string; surveyComplete: boolean }>> {
+  try {
+    if (!validateAdminPassword(adminPassword)) {
+      throw new Error("Admin password is incorrect.");
+    }
+    const supabase = createServiceClient();
+    const game = await getGameByCode(gameCode);
+    const cleanEmail = normalizeEmail(email);
+    const cleanAuthCode = newAuthCode.trim();
+    if (!cleanEmail || !cleanEmail.includes("@")) {
+      throw new Error("Enter the player's email address.");
+    }
+    if (cleanAuthCode.length < 4) {
+      throw new Error("Choose a private code with at least 4 characters.");
+    }
+    const playerResult = await supabase
+      .from("players")
+      .select("*")
+      .eq("game_id", game.id)
+      .eq("login_email", cleanEmail)
+      .single() as DbResult<Player>;
+    const player = requireData<Player>(playerResult, "No player found with that email in this game.") as Player;
+    await supabase
+      .from("players")
+      .update({
+        auth_code_hash: hashAuthCode(game.id, cleanEmail, cleanAuthCode),
+        device_session_id: deviceSessionId
+      })
+      .eq("id", player.id);
+    await setPlayerSessionCookie(game.code, deviceSessionId);
+    await insertNotification(game.id, "Player private code reset", `${player.name}'s private code was reset with admin approval.`, "admin");
+    const surveyComplete = await isSurveyComplete(game.id, player.id);
+    return { ok: true, data: { playerId: player.id, code: game.code, surveyComplete } };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Password reset failed." };
   }
 }
 

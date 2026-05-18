@@ -63,3 +63,7 @@ export async function clearAdminSession() {
 export function validateAdminCredentials(email: string, password: string) {
   return email.trim().toLowerCase() === ADMIN_EMAIL && password === ADMIN_PASSWORD;
 }
+
+export function validateAdminPassword(password: string) {
+  return password === ADMIN_PASSWORD;
+}
